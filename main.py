@@ -149,11 +149,41 @@ INDUSTRY_COLUMN_ORDER = {
 
 # Tier configurations
 TIER_CONFIGS = {
-    "free": {"max_images": 10, "max_images_per_batch": 5, "ocr_engine": "google_vision"},
-    "starter": {"max_images": 200, "max_images_per_batch": 50, "ocr_engine": "google_vision"},
-    "basic": {"max_images": 500, "max_images_per_batch": 100, "ocr_engine": "google_vision"},
-    "pro": {"max_images": 2000, "max_images_per_batch": 200, "ocr_engine": "gemini"},
-    "enterprise": {"max_images": 10000, "max_images_per_batch": 500, "ocr_engine": "gemini"}
+    "free": {
+        "max_images": 10,
+        "max_images_per_batch": 5,
+        "ocr_engine": "google_vision",
+        "retention_days": 3,
+        "max_suppliers": 1
+    },
+    "starter": {
+        "max_images": 200,
+        "max_images_per_batch": 50,
+        "ocr_engine": "google_vision",
+        "retention_days": 30,
+        "max_suppliers": 3
+    },
+    "basic": {
+        "max_images": 500,
+        "max_images_per_batch": 100,
+        "ocr_engine": "google_vision",
+        "retention_days": 30,
+        "max_suppliers": 3
+    },
+    "pro": {
+        "max_images": 2000,
+        "max_images_per_batch": 200,
+        "ocr_engine": "gemini",
+        "retention_days": 90,
+        "max_suppliers": 5
+    },
+    "enterprise": {
+        "max_images": 10000,
+        "max_images_per_batch": 500,
+        "ocr_engine": "gemini",
+        "retention_days": 90,
+        "max_suppliers": 999
+    }
 }
 
 # ===========================================
@@ -724,6 +754,166 @@ def get_tiers():
             for tier, config in TIER_CONFIGS.items()
         }
     }
+
+# ===========================================
+# SUPPLIERS ENDPOINTS
+# ===========================================
+
+def create_thumbnail(image_bytes: bytes, max_size: tuple = (300, 300)) -> bytes:
+    """Create thumbnail from image bytes"""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        
+        output = io.BytesIO()
+        img.save(output, format='JPEG', quality=85)
+        output.seek(0)
+        return output.read()
+    except Exception as e:
+        print(f"Error creating thumbnail: {e}")
+        return None
+
+@app.post("/suppliers")
+async def create_supplier(
+    name: str = Form(...),
+    description: str = Form(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new supplier/provider"""
+    user_id = current_user['id']
+    tier = current_user['tier']
+    tier_config = TIER_CONFIGS.get(tier, TIER_CONFIGS['free'])
+    max_suppliers = tier_config.get('max_suppliers', 1)
+    
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(
+            "SELECT COUNT(*) FROM suppliers WHERE user_id = %s AND is_active = true",
+            (user_id,)
+        )
+        current_count = cursor.fetchone()[0]
+        
+        if current_count >= max_suppliers:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your {tier} plan allows maximum {max_suppliers} suppliers. Upgrade to add more."
+            )
+        
+        cursor.execute(
+            "SELECT id FROM suppliers WHERE user_id = %s AND name = %s",
+            (user_id, name)
+        )
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail=f"Supplier '{name}' already exists")
+        
+        cursor.execute(
+            """
+            INSERT INTO suppliers (user_id, name, description)
+            VALUES (%s, %s, %s)
+            RETURNING id, name, description, total_images_processed, is_active, created_at
+            """,
+            (user_id, name, description)
+        )
+        row = cursor.fetchone()
+        conn.commit()
+        
+        return {
+            "id": row[0],
+            "name": row[1],
+            "description": row[2],
+            "total_images_processed": row[3],
+            "is_active": row[4],
+            "created_at": row[5]
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/suppliers")
+async def list_suppliers(current_user: dict = Depends(get_current_user)):
+    """List all active suppliers for current user"""
+    user_id = current_user['id']
+    
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(
+            """
+            SELECT id, name, description, total_images_processed, is_active, created_at
+            FROM suppliers
+            WHERE user_id = %s AND is_active = true
+            ORDER BY created_at DESC
+            """,
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+        
+        return {
+            "suppliers": [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "description": row[2],
+                    "total_images_processed": row[3],
+                    "is_active": row[4],
+                    "created_at": row[5]
+                }
+                for row in rows
+            ]
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/suppliers/{supplier_id}/stats")
+async def get_supplier_stats(supplier_id: int, current_user: dict = Depends(get_current_user)):
+    """Get statistics for a supplier"""
+    user_id = current_user['id']
+    
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(
+            """
+            SELECT * FROM supplier_stats
+            WHERE supplier_id = %s AND user_id = %s
+            """,
+            (supplier_id, user_id)
+        )
+        row = cursor.fetchone()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="Supplier not found")
+        
+        return {
+            "supplier_id": row[0],
+            "supplier_name": row[2],
+            "total_batches": row[4] if len(row) > 4 else 0,
+            "total_images": row[5] if len(row) > 5 else 0,
+            "images_processed": row[6] if len(row) > 6 else 0,
+            "last_batch_date": row[7] if len(row) > 7 and row[7] else None
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
 
 if __name__ == "__main__":
     import uvicorn
