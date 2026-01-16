@@ -241,7 +241,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         return int(user_id)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
-    except Exception:
+    except jwt.JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 def upload_to_s3(file_content: bytes, filename: str, user_id: int, content_type: str) -> str:
@@ -777,18 +777,21 @@ def create_thumbnail(image_bytes: bytes, max_size: tuple = (300, 300)) -> bytes:
 async def create_supplier(
     name: str = Form(...),
     description: str = Form(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: int = Depends(get_current_user)
 ):
     """Create a new supplier/provider"""
-    user_id = current_user['id']
-    tier = current_user['tier']
-    tier_config = TIER_CONFIGS.get(tier, TIER_CONFIGS['free'])
-    max_suppliers = tier_config.get('max_suppliers', 1)
+    user_id = current_user
     
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     
     try:
+        # Get user tier
+        cursor.execute("SELECT tier FROM users WHERE id = %s", (user_id,))
+        tier = cursor.fetchone()[0]
+        tier_config = TIER_CONFIGS.get(tier, TIER_CONFIGS['free'])
+        max_suppliers = tier_config.get('max_suppliers', 1)
+        
         cursor.execute(
             "SELECT COUNT(*) FROM suppliers WHERE user_id = %s AND is_active = true",
             (user_id,)
@@ -838,9 +841,9 @@ async def create_supplier(
         conn.close()
 
 @app.get("/suppliers")
-async def list_suppliers(current_user: dict = Depends(get_current_user)):
+async def list_suppliers(current_user: int = Depends(get_current_user)):
     """List all active suppliers for current user"""
-    user_id = current_user['id']
+    user_id = current_user
     
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -878,9 +881,9 @@ async def list_suppliers(current_user: dict = Depends(get_current_user)):
         conn.close()
 
 @app.get("/suppliers/{supplier_id}/stats")
-async def get_supplier_stats(supplier_id: int, current_user: dict = Depends(get_current_user)):
+async def get_supplier_stats(supplier_id: int, current_user: int = Depends(get_current_user)):
     """Get statistics for a supplier"""
-    user_id = current_user['id']
+    user_id = current_user
     
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
