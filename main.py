@@ -241,7 +241,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         return int(user_id)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.JWTError:
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 def upload_to_s3(file_content: bytes, filename: str, user_id: int, content_type: str) -> str:
